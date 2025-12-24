@@ -1,5 +1,5 @@
-import { useState, useMemo, useRef, useEffect, Suspense } from 'react';
-import { Canvas, useFrame, extend } from '@react-three/fiber';
+import { useState, useMemo, useRef, useEffect, Suspense, Component, type ReactNode, useCallback } from 'react';
+import { Canvas, useFrame, extend, useThree } from '@react-three/fiber';
 import {
   OrbitControls,
   Environment,
@@ -79,6 +79,20 @@ const FoliageMaterial = shaderMaterial(
 );
 extend({ FoliageMaterial });
 
+class SilentErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {
+  state = { hasError: false };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  // Render nothing on load errors (e.g., blocked HDRI fetches).
+  render() {
+    if (this.state.hasError) return null;
+    return this.props.children;
+  }
+}
+
 // --- Helper: Tree Shape ---
 const getTreePosition = () => {
   const h = CONFIG.tree.height; const rBase = CONFIG.tree.radius;
@@ -124,10 +138,12 @@ const Foliage = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Component: Photo Ornaments (Double-Sided Polaroid) ---
-const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
+const PhotoOrnaments = ({ state, onRegisterPicker }: { state: 'CHAOS' | 'FORMED', onRegisterPicker?: (fn: (() => string | null) | null) => void }) => {
   const textures = useTexture(CONFIG.photos.body);
   const count = CONFIG.counts.ornaments;
   const groupRef = useRef<THREE.Group>(null);
+  const photoRefs = useRef<THREE.Group[]>([]);
+  const { camera, size } = useThree();
 
   const borderGeometry = useMemo(() => new THREE.PlaneGeometry(1.2, 1.5), []);
   const photoGeometry = useMemo(() => new THREE.PlaneGeometry(1, 1), []);
@@ -166,6 +182,38 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
     });
   }, [textures, count]);
 
+  useEffect(() => {
+    if (!onRegisterPicker) return;
+    onRegisterPicker(() => {
+      const centerX = size.width / 2;
+      const centerY = size.height / 2;
+      let bestIndex = -1;
+      let bestDistance = Number.POSITIVE_INFINITY;
+      const temp = new THREE.Vector3();
+
+      data.forEach((obj, i) => {
+        const target = photoRefs.current[i];
+        if (!target) return;
+        target.getWorldPosition(temp);
+        temp.project(camera);
+        const screenX = (temp.x + 1) * 0.5 * size.width;
+        const screenY = (1 - (temp.y + 1) * 0.5) * size.height;
+        const dx = screenX - centerX;
+        const dy = screenY - centerY;
+        const distance = Math.hypot(dx, dy);
+        if (distance < bestDistance) {
+          bestDistance = distance;
+          bestIndex = i;
+        }
+      });
+
+      if (bestIndex < 0) return null;
+      const textureIndex = data[bestIndex].textureIndex;
+      return CONFIG.photos.body[textureIndex] ?? null;
+    });
+    return () => onRegisterPicker(null);
+  }, [onRegisterPicker, camera, size, data]);
+
   useFrame((stateObj, delta) => {
     if (!groupRef.current) return;
     const isFormed = state === 'FORMED';
@@ -198,7 +246,14 @@ const PhotoOrnaments = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
   return (
     <group ref={groupRef}>
       {data.map((obj, i) => (
-        <group key={i} scale={[obj.scale, obj.scale, obj.scale]} rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}>
+        <group
+          key={i}
+          ref={(node) => {
+            if (node) photoRefs.current[i] = node;
+          }}
+          scale={[obj.scale, obj.scale, obj.scale]}
+          rotation={state === 'CHAOS' ? obj.chaosRotation : [0,0,0]}
+        >
           {/* 正面 */}
           <group position={[0, 0, 0.015]}>
             <mesh geometry={photoGeometry}>
@@ -380,7 +435,7 @@ const TopStar = ({ state }: { state: 'CHAOS' | 'FORMED' }) => {
 };
 
 // --- Main Scene Experience ---
-const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number }) => {
+const Experience = ({ sceneState, rotationSpeed, onRegisterPicker }: { sceneState: 'CHAOS' | 'FORMED', rotationSpeed: number, onRegisterPicker?: (fn: (() => string | null) | null) => void }) => {
   const controlsRef = useRef<any>(null);
   useFrame(() => {
     if (controlsRef.current) {
@@ -396,7 +451,11 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
 
       <color attach="background" args={['#000300']} />
       <Stars radius={100} depth={50} count={5000} factor={4} saturation={0} fade speed={1} />
-      <Environment preset="night" background={false} />
+      <SilentErrorBoundary>
+        <Suspense fallback={null}>
+          <Environment preset="night" background={false} />
+        </Suspense>
+      </SilentErrorBoundary>
 
       <ambientLight intensity={0.4} color="#003311" />
       <pointLight position={[30, 30, 30]} intensity={100} color={CONFIG.colors.warmLight} />
@@ -406,7 +465,7 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
       <group position={[0, -6, 0]}>
         <Foliage state={sceneState} />
         <Suspense fallback={null}>
-           <PhotoOrnaments state={sceneState} />
+           <PhotoOrnaments state={sceneState} onRegisterPicker={onRegisterPicker} />
            <ChristmasElements state={sceneState} />
            <FairyLights state={sceneState} />
            <TopStar state={sceneState} />
@@ -424,9 +483,11 @@ const Experience = ({ sceneState, rotationSpeed }: { sceneState: 'CHAOS' | 'FORM
 
 // --- Gesture Controller ---
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
+const GestureController = ({ onGesture, onMove, onStatus, onPinch, onOkState, debugMode }: any) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const pinchActiveRef = useRef(false);
+  const lastPinchTimeRef = useRef(0);
 
   useEffect(() => {
     let gestureRecognizer: GestureRecognizer;
@@ -482,18 +543,44 @@ const GestureController = ({ onGesture, onMove, onStatus, debugMode }: any) => {
                  if (name === "Open_Palm") onGesture("CHAOS"); if (name === "Closed_Fist") onGesture("FORMED");
                  if (debugMode) onStatus(`DETECTED: ${name}`);
               }
-              if (results.landmarks.length > 0) {
-                const speed = (0.5 - results.landmarks[0][0].x) * 0.15;
-                onMove(Math.abs(speed) > 0.01 ? speed : 0);
+            }
+
+            if (results.landmarks.length > 0) {
+              const speed = (0.5 - results.landmarks[0][0].x) * 0.15;
+              onMove(Math.abs(speed) > 0.01 ? speed : 0);
+              const now = Date.now();
+              const hand = results.landmarks[0];
+              if (hand) {
+                const pinchDistance = Math.hypot(hand[4].x - hand[8].x, hand[4].y - hand[8].y);
+                const handSize = Math.hypot(hand[0].x - hand[9].x, hand[0].y - hand[9].y);
+                const isPinching = pinchDistance < handSize * 0.25;
+                const dist = (a: number, b: number) => Math.hypot(hand[a].x - hand[b].x, hand[a].y - hand[b].y);
+                const middleExtended = dist(12, 0) > dist(10, 0) + 0.02;
+                const ringExtended = dist(16, 0) > dist(14, 0) + 0.02;
+                const pinkyExtended = dist(20, 0) > dist(18, 0) + 0.02;
+                const isOk = isPinching && middleExtended && ringExtended && pinkyExtended;
+
+                  onOkState?.(isOk);
+                  if (debugMode) onStatus(`OK:${isOk ? 'Y' : 'N'} pinch:${pinchDistance.toFixed(3)} size:${handSize.toFixed(3)}`);
+
+                if (isOk && !pinchActiveRef.current && now - lastPinchTimeRef.current > 800) {
+                  onPinch?.();
+                  lastPinchTimeRef.current = now;
+                }
+                pinchActiveRef.current = isOk;
               }
-            } else { onMove(0); if (debugMode) onStatus("AI READY: NO HAND"); }
+            } else {
+              onOkState?.(false);
+              onMove(0);
+              if (debugMode) onStatus("AI READY: NO HAND");
+            }
         }
         requestRef = requestAnimationFrame(predictWebcam);
       }
     };
     setup();
     return () => cancelAnimationFrame(requestRef);
-  }, [onGesture, onMove, onStatus, debugMode]);
+  }, [onGesture, onMove, onStatus, onPinch, onOkState, debugMode]);
 
   return (
     <>
@@ -509,15 +596,69 @@ export default function GrandTreeApp() {
   const [rotationSpeed, setRotationSpeed] = useState(0);
   const [aiStatus, setAiStatus] = useState("INITIALIZING...");
   const [debugMode, setDebugMode] = useState(false);
+  const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
+  const [okActive, setOkActive] = useState(false);
+  const pickNearestRef = useRef<(() => string | null) | null>(null);
+
+  const handleRegisterPicker = useCallback((fn: (() => string | null) | null) => {
+    pickNearestRef.current = fn;
+  }, []);
+
+  const handlePinch = useCallback(() => {
+    if (selectedPhoto) return;
+    const picker = pickNearestRef.current;
+    if (!picker) return;
+    const path = picker();
+    if (path) setSelectedPhoto(path);
+  }, [selectedPhoto]);
+
+  useEffect(() => {
+    if (!selectedPhoto) return undefined;
+    if (okActive) return undefined;
+
+    const closeTimer = window.setTimeout(() => {
+      setSelectedPhoto(null);
+    }, 300);
+
+    return () => window.clearTimeout(closeTimer);
+  }, [okActive, selectedPhoto]);
 
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
         <Canvas dpr={[1, 2]} gl={{ toneMapping: THREE.ReinhardToneMapping }} shadows>
-            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} />
+            <Experience sceneState={sceneState} rotationSpeed={rotationSpeed} onRegisterPicker={handleRegisterPicker} />
         </Canvas>
       </div>
-      <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} debugMode={debugMode} />
+      <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} onPinch={handlePinch} onOkState={setOkActive} debugMode={debugMode} />
+
+      {selectedPhoto && (
+        <div
+          onClick={() => setSelectedPhoto(null)}
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 200,
+            background: 'rgba(0,0,0,0.88)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            cursor: 'zoom-out'
+          }}
+        >
+          <img
+            src={selectedPhoto}
+            alt="Selected memory"
+            style={{
+              maxWidth: '92vw',
+              maxHeight: '92vh',
+              objectFit: 'contain',
+              boxShadow: '0 40px 120px rgba(0,0,0,0.6)',
+              borderRadius: '8px'
+            }}
+          />
+        </div>
+      )}
 
       {/* UI - Stats */}
       <div style={{ position: 'absolute', bottom: '30px', left: '40px', color: '#888', zIndex: 10, fontFamily: 'sans-serif', userSelect: 'none' }}>
