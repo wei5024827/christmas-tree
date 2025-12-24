@@ -598,6 +598,7 @@ export default function GrandTreeApp() {
   const [debugMode, setDebugMode] = useState(false);
   const [selectedPhoto, setSelectedPhoto] = useState<string | null>(null);
   const [okActive, setOkActive] = useState(false);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const pickNearestRef = useRef<(() => string | null) | null>(null);
 
   const handleRegisterPicker = useCallback((fn: (() => string | null) | null) => {
@@ -623,6 +624,28 @@ export default function GrandTreeApp() {
     return () => window.clearTimeout(closeTimer);
   }, [okActive, selectedPhoto]);
 
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio) return undefined;
+
+    const tryPlay = async () => {
+      try {
+        await audio.play();
+      } catch {
+        // Autoplay may be blocked; wait for a user gesture.
+      }
+    };
+
+    tryPlay();
+
+    const onFirstGesture = () => {
+      tryPlay();
+    };
+
+    window.addEventListener('pointerdown', onFirstGesture, { once: true });
+    return () => window.removeEventListener('pointerdown', onFirstGesture);
+  }, []);
+
   return (
     <div style={{ width: '100vw', height: '100vh', backgroundColor: '#000', position: 'relative', overflow: 'hidden' }}>
       <div style={{ width: '100%', height: '100%', position: 'absolute', top: 0, left: 0, zIndex: 1 }}>
@@ -631,6 +654,7 @@ export default function GrandTreeApp() {
         </Canvas>
       </div>
       <GestureController onGesture={setSceneState} onMove={setRotationSpeed} onStatus={setAiStatus} onPinch={handlePinch} onOkState={setOkActive} debugMode={debugMode} />
+      <audio ref={audioRef} src="/music/1.mp3" loop preload="auto" />
 
       {selectedPhoto && (
         <div
